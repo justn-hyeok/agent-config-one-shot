@@ -27,4 +27,4 @@ jobs:
       - name: Build distributions
         run: python -m build
       - name: Verify installed wheel
-        run: python scripts/verify_package.py dist/agent_config_one_shot-0.1.0-py3-none-any.whl --source dist/agent_config_one_shot-0.1.0.tar.gz
+        run: python scripts/verify_package.py dist/*.whl --source dist/*.tar.gz

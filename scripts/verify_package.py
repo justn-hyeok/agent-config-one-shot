@@ -4,12 +4,70 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import pty
+import select
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
+
+
+def terminal_flow(cli: Path, root: Path, source: Path, *, cancel: bool):
+    import fcntl
+    import termios
+    home = root / ('cancel-home' if cancel else 'tui-home')
+    home.mkdir()
+    bin_dir = root / ('cancel-bin' if cancel else 'tui-bin')
+    bin_dir.mkdir()
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+    environment = os.environ.copy()
+    environment.update(TERM='xterm-256color', PATH=str(bin_dir))
+
+    def controlling_terminal():
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    process = subprocess.Popen(
+        [str(cli), 'install', '--home', str(home), '--skills-source', str(source)],
+        stdin=slave, stdout=slave, stderr=slave, env=environment,
+        preexec_fn=controlling_terminal,
+    )
+    transcript = b''
+    submitted = False
+    deadline = time.monotonic() + 20
+    try:
+        while process.poll() is None and time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    transcript += os.read(master, 65536)
+                except OSError:
+                    break
+            if not submitted and b'Choose harnesses to configure' in transcript:
+                assert not (home / '.agents/agent-config-one-shot').exists()
+                os.write(master, b'\x1b' if cancel else b'j jj \r')
+                submitted = True
+        assert submitted, 'Installed CLI did not render its selector'
+        assert process.poll() == (130 if cancel else 0), 'Installed selector did not complete'
+        if cancel:
+            assert not (home / '.agents/agent-config-one-shot').exists()
+        else:
+            state = json.loads((home / '.agents/agent-config-one-shot/state.json').read_text())
+            assert state['harnesses'] == ['claude', 'copilot']
+            assert not (home / '.codex').exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            termios.tcflush(slave, termios.TCIOFLUSH)
+            process.wait(timeout=5)
+        os.close(master)
+        os.close(slave)
 
 
 def run(args, cwd):
@@ -75,11 +133,14 @@ def main():
                                  cwd=root, capture_output=True, text=True, timeout=15)
         assert invalid.returncode == 2
         assert "Unknown harness" in invalid.stderr
+        terminal_flow(cli, root, source.parent, cancel=False)
+        terminal_flow(cli, root, source.parent, cancel=True)
     print(json.dumps({"status": "passed", "wheel": wheel.name,
                       "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
                       "checks": ["artifact allowlist", "fresh-venv installation", "11 adapters",
                                  "side-effect-free preview", "install/doctor/repeat/restore/recover",
-                                 "native bytes preserved", "invalid selector rejected"]}, indent=2))
+                                 "native bytes preserved", "invalid selector rejected",
+                                 "installed TUI multiselect", "installed TUI cancel without writes"]}, indent=2))
 
 
 if __name__ == "__main__":

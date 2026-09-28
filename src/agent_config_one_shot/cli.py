@@ -10,6 +10,7 @@ import sys
 from . import __version__
 from .adapters import ADAPTERS
 from .engine import ConfigError, Manager
+from .selector import SelectionCancelled, choose_harnesses
 
 
 def context_options(parser: argparse.ArgumentParser, *, inherited: bool = False):
@@ -41,6 +42,9 @@ def parser() -> argparse.ArgumentParser:
                              help="Harness ID; repeat, comma-separate, or use 'all'")
         command.add_argument("--skills-source", type=Path,
                              help="Your skills directory (default: HOME/.agents/skills)")
+        mode = command.add_mutually_exclusive_group()
+        mode.add_argument("--interactive", action="store_true", help="Choose harnesses in a terminal checklist")
+        mode.add_argument("--non-interactive", action="store_true", help="Use explicit or detected harnesses without a screen")
         if name == "install":
             command.add_argument("--dry-run", action="store_true", help="Preview without writes")
     for name, help_text in (("doctor", "Check managed wiring without agent/model calls"),
@@ -114,7 +118,15 @@ def main(argv: list[str] | None = None) -> int:
         manager = Manager(args.home or Path.home(), args.root)
         if args.command in {"plan", "install"}:
             names = select(args.harness)
-            if args.command == "plan" or args.dry_run:
+            preview = args.command == "plan" or args.dry_run
+            if args.interactive and args.json:
+                raise ConfigError("--interactive cannot be combined with --json. Use --harness for JSON output.")
+            interactive = args.interactive or (
+                not args.harness and not args.non_interactive and not args.json
+                and sys.stdin.isatty() and sys.stdout.isatty())
+            if interactive:
+                names = choose_harnesses(harness_list(), names, preview=preview)
+            if preview:
                 value = {"status": "plan", **manager.plan(names, args.skills_source).public()}
             else:
                 value = manager.apply(names, args.skills_source)
@@ -126,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
             value = manager.recover()
         display(value, args.json)
         return 1 if value.get("status") == "fail" else 0
+    except SelectionCancelled:
+        print("Cancelled: no configuration changes.")
+        return 130
     except ConfigError as error:
         message = str(error)
     except (OSError, RuntimeError, UnicodeError, ValueError):

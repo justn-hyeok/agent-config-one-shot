@@ -9,16 +9,15 @@
 기능도 제공합니다. 인증, 세션, 프로바이더별 형식, 모델 선택, 플러그인 캐시는
 각 하네스가 계속 관리합니다.
 
-**v0.1은 Python 3.11 이상의 macOS·Linux 환경을 지원합니다.**
+**v0.2는 Python 3.11 이상의 macOS·Linux 환경을 지원합니다.**
 Windows 설치는 아직 지원하지 않습니다. 이 도구는 에이전트 바이너리를
 실행하거나 유료 모델 요청을 보내지 않습니다.
 
 ## 릴리스 설치
 
 ```sh
-uv tool install https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.1.0/agent_config_one_shot-0.1.0-py3-none-any.whl
-agent-config-one-shot plan --harness claude,copilot
-agent-config-one-shot install --harness claude,copilot
+uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.0/agent_config_one_shot-0.2.0-py3-none-any.whl
+agent-config-one-shot install
 agent-config-one-shot doctor
 ```
 
@@ -42,7 +41,8 @@ agent-config-one-shot doctor
 ./setup.sh --harness claude,cursor-cli,copilot,amp
 ```
 
-`--harness`를 생략하면 실행 파일이 감지된 하네스를 선택합니다.
+터미널에서 `--harness`를 생략하면 아래 선택 화면이 열립니다.
+터미널이 없는 환경에서는 기존처럼 실행 파일이 감지된 하네스를 선택합니다.
 `--harness all`은 CLI 설치 여부와 관계없이 11개 어댑터를 모두 선택합니다.
 이 선택은 설정 경로를 연결하는 작업입니다. 각 CLI의 설치·로그인은 별도로
 진행해야 합니다.
@@ -54,6 +54,36 @@ agent-config-one-shot doctor
 아직 패키지 레지스트리에는 게시하지 않았습니다. 소스 저장소나 검증된 wheel로
 설치하세요. `uv` 외에도 `pipx install .` 또는 `python -m pip install .`로
 CLI를 설치할 수 있습니다.
+
+## TUI에서 하네스 선택하기
+
+```sh
+agent-config-one-shot install
+```
+
+11개 하네스와 각 CLI의 감지 여부를 체크 목록으로 보여줍니다.
+감지된 CLI는 미리 선택되어 있으며, 원하는 항목을 추가하거나 해제할 수 있습니다.
+방향키로 이동하고 Space로 체크한 뒤 Enter로 선택한 대상의 설정을 연결합니다.
+`a`는 전체 선택, `n`은 선택 해제, `d`는 감지된 CLI만 선택합니다.
+Esc·`q`·Ctrl-C로 취소하면 설정이나 관리 파일을 만들지 않습니다.
+아무것도 선택하지 않고 Enter를 누르면 선택 화면을 유지합니다.
+
+`plan`과 `install --dry-run`에서도 같은 화면으로 읽기 전용 계획을 확인할 수 있습니다.
+Enter로 대상을 확정하기 전에는 설정을 변경하지 않습니다.
+감지되지 않은 CLI를 선택해도 연결하는 것은 설정 경로이며, CLI 설치·로그인은 별도입니다.
+
+스크립트에서는 `--harness`로 대상을 지정하거나 `--non-interactive`를 사용하세요.
+
+```sh
+agent-config-one-shot install --harness claude,copilot
+agent-config-one-shot install --non-interactive
+agent-config-one-shot plan --interactive --harness claude
+```
+
+`--interactive`는 선택 화면을 강제로 열고, 지정한 ID를 초기 선택으로 사용합니다.
+터미널 입출력이 필요하며, `--json`과 함께 사용할 수 없습니다.
+`--json`은 화면 없이 실행합니다. 터미널이 44열 × 10행보다 작으면 창 크기를
+늘리거나 취소할 수 있으며, 충분한 공간이 생기기 전에는 선택을 진행하지 않습니다.
 
 ## 명령어
 

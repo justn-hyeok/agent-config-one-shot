@@ -8,15 +8,14 @@ Connect your own skills to selected coding agents, keep a central view of their
 native settings, and verify or undo the wiring. Authentication, sessions,
 provider formats, model choices, and plugin caches stay with each harness.
 
-**v0.1 supports macOS and Linux with Python 3.11+.** Windows installation is
+**v0.2 supports macOS and Linux with Python 3.11+.** Windows installation is
 not supported yet. No agent binaries or paid model requests are launched.
 
 ## Install the release
 
 ```sh
-uv tool install https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.1.0/agent_config_one_shot-0.1.0-py3-none-any.whl
-agent-config-one-shot plan --harness claude,copilot
-agent-config-one-shot install --harness claude,copilot
+uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.0/agent_config_one_shot-0.2.0-py3-none-any.whl
+agent-config-one-shot install
 agent-config-one-shot doctor
 ```
 
@@ -39,7 +38,9 @@ With your existing `~/.agents/skills`, one setup command is enough:
 ./setup.sh --harness claude,cursor-cli,copilot,amp
 ```
 
-Omit `--harness` to select detected executables. `--harness all` explicitly
+In a terminal, omit `--harness` to choose targets in the checklist below.
+Without a terminal, omitted targets still select detected executables.
+`--harness all` explicitly
 selects all eleven adapters, even if the CLIs are not installed. Selecting a
 harness configures paths; it does not install or authenticate that CLI.
 
@@ -49,6 +50,36 @@ Once the CLI is installed, use `agent-config-one-shot install` directly.
 This project is not published to a package registry yet. Install from a local
 checkout or a verified wheel. `uv` is convenient, not required: `pipx install .`
 or `python -m pip install .` also provides the command.
+
+## Choose harnesses in the terminal
+
+```sh
+agent-config-one-shot install
+```
+
+The checklist shows all eleven harnesses and whether their CLI is detected.
+Detected CLIs are preselected; you can select other targets or deselect any row.
+Use Up/Down to move, Space to toggle, and Enter to configure the selection.
+`a` selects all, `n` clears the list, and `d` selects detected CLIs.
+Esc, `q`, or Ctrl-C cancels without creating configuration or control state.
+An empty selection stays on the screen until you select something or cancel.
+
+`plan` and `install --dry-run` use the same checklist for a read-only preview.
+Nothing is configured before you accept the selected targets with Enter.
+Selecting a missing CLI configures its paths; CLI installation/login remain separate.
+
+For scripts, keep explicit `--harness` values or use `--non-interactive`:
+
+```sh
+agent-config-one-shot install --harness claude,copilot
+agent-config-one-shot install --non-interactive
+agent-config-one-shot plan --interactive --harness claude
+```
+
+`--interactive` forces the checklist, with explicit IDs as its initial selection.
+It requires terminal input/output. `--json` stays headless and cannot be combined
+with `--interactive`. Terminals smaller than 44 columns × 10 rows can be resized
+or cancelled; selection does not proceed until there is enough room.
 
 ## Commands
 

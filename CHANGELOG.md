@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Add an interactive harness checklist to install and preview commands.
+- Show CLI detection, preselected targets, multi-select and keyboard controls.
+- Preserve explicit/headless/JSON workflows with --non-interactive support.
+- Cancel safely before configuration changes and restore terminal modes.
+- Add real PTY tests for selection, cancellation, empty selections and resizing.
+
 ## 0.1.0
 
 - Add eleven native harness adapters and selected-harness skill wiring.
