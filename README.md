@@ -1,5 +1,7 @@
 # agent-config-one-shot
 
+English | [한국어](README.ko.md)
+
 Set up shared agent configs across your coding harnesses in one command.
 
 Connect your own skills to selected coding agents, keep a central view of their
