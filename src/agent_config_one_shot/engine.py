@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 import hashlib
 import io
@@ -12,6 +13,7 @@ import re
 import stat
 import tempfile
 import uuid
+import warnings
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
@@ -82,14 +84,63 @@ def yaml_object(data: str, label: Path) -> tuple[YAML, dict]:
     parser.preserve_quotes = True
     parser.allow_duplicate_keys = False
     try:
-        result = parser.load(data)
-    except (YAMLError, ValueError):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = parser.load(data)
+    except (YAMLError, ValueError, Warning):
         raise ConfigError(f"Invalid YAML structure: {label}") from None
     if result is None:
         result = {}
     if not isinstance(result, dict):
         raise ConfigError(f"Expected a YAML object: {label}")
     return parser, result
+
+
+def yaml_bytes(parser: YAML, value: dict, label: Path) -> bytes:
+    output = io.StringIO()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            parser.dump(value, output)
+    except (YAMLError, ValueError, Warning):
+        raise ConfigError(f"Unsupported YAML serialization: {label}") from None
+    return output.getvalue().encode()
+
+
+def detached_yaml(value, label: Path):
+    """Separate owned mutable values from aliases used by unrelated settings."""
+    result = deepcopy(value)
+    seen = set()
+
+    def clear(item):
+        if id(item) in seen:
+            return
+        seen.add(id(item))
+        if hasattr(item, "yaml_set_anchor"):
+            item.yaml_set_anchor(None)
+        if isinstance(item, dict):
+            if getattr(item, "merge", None):
+                raise ConfigError(f"YAML merges inside GJC skills require manual configuration: {label}")
+            for key, child in item.items():
+                clear(key)
+                clear(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                clear(child)
+
+    clear(result)
+    return result
+
+
+def frontmatter(raw: str, label: Path) -> str:
+    lines = raw.lstrip('\ufeff').splitlines(keepends=True)
+    delimiter = re.compile(r'---[ \t]*(?:\r?\n)?')
+    if not lines or delimiter.fullmatch(lines[0]) is None:
+        raise ConfigError(f"Missing skill frontmatter: {label}")
+    for index, line in enumerate(lines[1:], 1):
+        if delimiter.fullmatch(line):
+            return ''.join(lines[1:index])
+    raise ConfigError(f"Missing closing skill frontmatter delimiter: {label}")
 
 
 def gjc_settings(path: Path, skills_root: Path) -> bytes | None:
@@ -99,18 +150,22 @@ def gjc_settings(path: Path, skills_root: Path) -> bytes | None:
         path = path.resolve()
     original = path.read_text() if path.exists() else ""
     parser, settings = yaml_object(original, path)
-    skills = settings.setdefault("skills", {})
+    skills = settings.get("skills", {})
     if not isinstance(skills, dict):
         raise ConfigError(f"Unsupported GJC skills setting: {path}")
-    directories = skills.setdefault("customDirectories", [])
+    directories = skills.get("customDirectories", [])
     if not isinstance(directories, list) or not all(isinstance(value, str) for value in directories):
         raise ConfigError(f"Unsupported GJC customDirectories setting: {path}")
     if str(skills_root) in directories:
         return None
-    directories.append(str(skills_root))
-    output = io.StringIO()
-    parser.dump(settings, output)
-    return output.getvalue().encode()
+    # Both the skills mapping and its list may be aliased elsewhere. Detach
+    # each mutation point so only skills.customDirectories changes.
+    owned_skills = detached_yaml(skills, path)
+    owned_directories = detached_yaml(directories, path)
+    owned_directories.append(str(skills_root))
+    owned_skills['customDirectories'] = owned_directories
+    settings['skills'] = owned_skills
+    return yaml_bytes(parser, settings, path)
 
 
 @dataclass
@@ -343,23 +398,18 @@ class Manager:
                     raise ConfigError(f"Unsupported skill directory name: {skill_file.parent}")
                 target = skill_file.parent
                 if name == "copilot":
-                    raw = skill_file.read_text()
-                    parts = raw.split("---", 2)
-                    if not raw.startswith("---") or len(parts) != 3:
-                        raise ConfigError(f"Missing skill frontmatter: {skill_file}")
-                    parser, metadata = yaml_object(parts[1], skill_file)
+                    parser, metadata = yaml_object(frontmatter(skill_file.read_text(), skill_file), skill_file)
                     hint = metadata.get("argument-hint")
                     if isinstance(hint, list):
                         if not all(isinstance(item, str) for item in hint):
                             raise ConfigError(f"Unsupported argument hint: {skill_file}")
                         metadata["argument-hint"] = " ".join(hint)
-                        header = io.StringIO()
-                        parser.dump(metadata, header)
+                        header = yaml_bytes(parser, metadata, skill_file).decode()
                         target = self.root / "compat/copilot" / label
                         canonical = str(skill_file.absolute())
                         if "`" in canonical or "\n" in canonical or "\r" in canonical:
                             raise ConfigError("Skill paths used in adapters must not contain control/backtick characters")
-                        body = (f"---\n{header.getvalue()}---\n\n"
+                        body = (f"---\n{header}---\n\n"
                                 f"Read `{canonical}` and follow its canonical procedure.\n"
                                 f"Resolve relative resources against `{skill_file.parent.absolute()}`.\n"
                                 "This adapter only normalizes metadata; task authorization still applies.\n")

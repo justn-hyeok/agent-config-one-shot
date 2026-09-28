@@ -9,6 +9,18 @@ provider formats, model choices, and plugin caches stay with each harness.
 **v0.1 supports macOS and Linux with Python 3.11+.** Windows installation is
 not supported yet. No agent binaries or paid model requests are launched.
 
+## Install the release
+
+```sh
+uv tool install https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.1.0/agent_config_one_shot-0.1.0-py3-none-any.whl
+agent-config-one-shot plan --harness claude,copilot
+agent-config-one-shot install --harness claude,copilot
+agent-config-one-shot doctor
+```
+
+The release also includes a source archive and SHA256 checksums. The examples
+below refer to a source checkout; the wheel provides the CLI directly.
+
 ## Try it locally
 
 ```sh
@@ -107,7 +119,9 @@ tool, its examples, and tests; no personal or third-party skill bundle ships.
   additive `skills.customDirectories` entry enables the managed directory.
   Round-trip YAML preserves unrelated settings and comments; the original
   file is backed up privately. If a user changes that file afterward, restore
-  refuses to replace it. This exception is the only native preference edit.
+  refuses to replace it. Aliased mappings/lists are detached before mutation.
+  Reused YAML anchors or merge keys inside the owned skills mapping are refused
+  without printing native values. This exception is the only native preference edit.
 - Copilot rejects array-valued `argument-hint` metadata. A small generated
   adapter normalizes the hint and references the original skill and resources.
   The shared skill body is not copied or rewritten.

@@ -18,4 +18,4 @@ agent-config-one-shot = "agent_config_one_shot.cli:main"
 packages = ["src/agent_config_one_shot"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "scripts", "examples", "setup.sh", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
+include = ["src", "tests", "scripts", "examples", "setup.sh", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml", "uv.lock"]

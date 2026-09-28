@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from ruamel.yaml import YAML
 
 from agent_config_one_shot.adapters import ADAPTERS
 from agent_config_one_shot.engine import ConfigError, Manager, fingerprint
@@ -366,6 +367,64 @@ with patch.object(Path,'symlink_to',killed): m.apply(['gjc'],Path(sys.argv[2]))
         with self.assertRaises(ConfigError):
             self.manager.restore()
         self.assertTrue((self.home / ".claude/skills/hello").is_symlink())
+
+    def test_frontmatter_scalar_delimiters_do_not_hide_copilot_hint(self):
+        skill = self.skill("understand", 'argument-hint: ["path", "options"]\n')
+        text = (skill / 'SKILL.md').read_text().replace('An isolated test skill', 'Handles left---right values')
+        (skill / 'SKILL.md').write_text(text)
+        self.manager.apply(['copilot'], self.skills)
+        adapted = (self.home / '.copilot/skills/understand/SKILL.md').read_text()
+        self.assertIn(str(skill / 'SKILL.md'), adapted)
+        self.assertIn('Handles left---right values', adapted)
+        self.assertEqual((skill / 'SKILL.md').read_text(), text)
+
+    def test_frontmatter_requires_a_closing_delimiter_line(self):
+        skill = self.skill('broken')
+        (skill / 'SKILL.md').write_text('---\nname: broken\ndescription: has---substring\n')
+        with self.assertRaises(ConfigError):
+            self.manager.plan(['copilot'], self.skills)
+
+    def test_anchored_gjc_directory_list_does_not_modify_other_settings(self):
+        path = self.native('.gjc/agent/config.yml',
+                           'unrelatedSearchDirs: &existing\n  - kept\nskills:\n  customDirectories: *existing\n')
+        original = path.read_bytes()
+        self.manager.apply(['gjc'], self.skills)
+        data = YAML(typ='safe').load(path.read_text())
+        self.assertEqual(data['unrelatedSearchDirs'], ['kept'])
+        self.assertEqual(len(data['skills']['customDirectories']), 2)
+        self.manager.restore()
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_anchored_gjc_mapping_and_internal_list_are_detached(self):
+        path = self.native('.gjc/agent/config.yml', '''
+skills: &group
+  customDirectories: &dirs
+    - kept
+  unrelatedDirectories: *dirs
+unrelatedGroup: *group
+''')
+        self.manager.apply(['gjc'], self.skills)
+        data = YAML(typ='safe').load(path.read_text())
+        self.assertEqual(data['unrelatedGroup']['customDirectories'], ['kept'])
+        self.assertEqual(data['skills']['unrelatedDirectories'], ['kept'])
+        self.assertEqual(len(data['skills']['customDirectories']), 2)
+
+    def test_reused_yaml_anchor_fails_without_printing_private_values(self):
+        path = self.native('.gjc/agent/config.yml',
+                           'first: &same PRIVATE-WARNING-VALUE\nsecond: &same other\n')
+        original = path.read_bytes()
+        result = self.cli('install', '--harness', 'gjc', '--skills-source', str(self.skills))
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn('PRIVATE-WARNING-VALUE', result.stdout + result.stderr)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_gjc_merged_skills_mapping_is_not_changed(self):
+        path = self.native('.gjc/agent/config.yml',
+                           'defaults: &defaults\n  customDirectories: []\nskills:\n  <<: *defaults\n')
+        original = path.read_bytes()
+        with self.assertRaises(ConfigError):
+            self.manager.apply(['gjc'], self.skills)
+        self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == "__main__":
