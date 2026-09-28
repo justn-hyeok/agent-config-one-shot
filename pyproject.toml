@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-config-one-shot"
+version = "0.1.0"
+description = "Connect shared skills and native coding-agent configs in one command."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["ruamel.yaml>=0.18.6,<0.19"]
+
+[project.scripts]
+agent-config-one-shot = "agent_config_one_shot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_config_one_shot"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "scripts", "examples", "setup.sh", "README.md", "LICENSE", "pyproject.toml", "uv.lock"]
