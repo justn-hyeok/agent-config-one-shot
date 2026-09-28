@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+- Preserve concurrent GJC config saves with exclusive publication and retained native inodes.
+- Recover native moves interrupted during installation or restore; protect legacy installs during restore.
+- Reject dangling GJC config targets whose parent directory is missing before native mutation.
+- Refresh unmodified managed Copilot adapters after metadata changes and diagnose stale adapters.
+- Preserve the original undo record across repeated Copilot refreshes.
+- Handle scalar-to-array Copilot hints by safely retargeting owned links and diagnosing missing adapters.
+- Reject redirected journal/backup directories and validate backup parents.
+- Add regression tests for races, retained descriptors, interrupted native moves, refresh rollback and path boundaries.
+
 ## 0.2.0
 
 - Add an interactive harness checklist to install and preview commands.

@@ -14,7 +14,7 @@ not supported yet. No agent binaries or paid model requests are launched.
 ## Install the release
 
 ```sh
-uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.0/agent_config_one_shot-0.2.0-py3-none-any.whl
+uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.1/agent_config_one_shot-0.2.1-py3-none-any.whl
 agent-config-one-shot install
 agent-config-one-shot doctor
 ```
@@ -155,9 +155,15 @@ tool, its examples, and tests; no personal or third-party skill bundle ships.
   refuses to replace it. Aliased mappings/lists are detached before mutation.
   Reused YAML anchors or merge keys inside the owned skills mapping are refused
   without printing native values. This exception is the only native preference edit.
+  A redirected config target's parent directory must already exist, and the native
+  config must remain outside the control root.
 - Copilot rejects array-valued `argument-hint` metadata. A small generated
   adapter normalizes the hint and references the original skill and resources.
   The shared skill body is not copied or rewritten.
+  Rerun install to refresh changed source metadata; user-edited generated adapters
+  remain protected, and `doctor` reports stale metadata.
+  Refresh keeps the same canonical source path. A different same-name source is a
+  conflict; use a distinct skill name or restore the existing wiring first.
 
 ## Repeatability and recovery
 
@@ -171,6 +177,15 @@ An installation error rolls back that transaction. If the process is killed,
 before rollback, or completes an interrupted restore. Edits made by another writer cause a refusal rather than a
 clobber. Local journals are recovery records, not a security boundary against
 someone who can edit your private control files.
+
+GJC native writes retain displaced files in a private
+`.agent-config-one-shot-<transaction>-<operation>` directory beside the config.
+New bytes are published only to an absent path: a concurrent native save wins.
+The native path can be briefly absent during this operation; interrupted moves
+are recovered from the retained file. Writes through an already-open descriptor
+remain in that retained file and are reported by `doctor` for manual reconciliation.
+These local recovery copies survive restore and must not be exported.
+The journal and backup directories must be real directories, not symlinks.
 
 `restore` checks the entire installation first. It removes created links and
 generated adapters, restores unchanged managed native edits, and retains new

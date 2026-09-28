@@ -16,7 +16,7 @@ Windows 설치는 아직 지원하지 않습니다. 이 도구는 에이전트 �
 ## 릴리스 설치
 
 ```sh
-uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.0/agent_config_one_shot-0.2.0-py3-none-any.whl
+uv tool install --upgrade https://github.com/justn-hyeok/agent-config-one-shot/releases/download/v0.2.1/agent_config_one_shot-0.2.1-py3-none-any.whl
 agent-config-one-shot install
 agent-config-one-shot doctor
 ```
@@ -177,6 +177,23 @@ CLI가 해당 파일을 생성한 뒤 다시 실행하면 연결할 수 있습�
 설치를 되돌리거나 중단된 복구를 완료합니다. 다른 프로그램이 수정한 내용은
 덮어쓰지 않고 작업을 거부합니다. 로컬 작업 기록은 복구를 위한 자료입니다.
 관리 파일을 직접 수정할 수 있는 사람에 대한 보안 경계는 아닙니다.
+
+GJC 설정 파일은 변경 전 파일을 설정 옆의 비공개
+`.agent-config-one-shot-<transaction>-<operation>` 디렉터리에 보존합니다.
+새 파일은 원래 경로가 비어 있을 때만 연결하므로, 동시에 저장된 파일을
+덮어쓰지 않습니다. 이 과정에서 설정 경로가 잠깐 비어 있을 수 있으며,
+이동 중 종료되면 보존 파일로 복구합니다. 다른 프로그램이 이미 열어둔 파일에
+뒤늦게 저장한 내용도 보존 파일에 남고, `doctor`가 수동 확인 대상으로 알립니다.
+이 복구 자료는 `restore` 후에도 남으며 외부로 내보내면 안 됩니다.
+설정 링크의 대상 폴더는 미리 존재해야 하고 원래 설정은 관리 루트 밖에 있어야 합니다.
+작업 기록과 백업 폴더는
+심볼릭 링크가 아닌 실제 디렉터리여야 합니다.
+
+Copilot 원본 스킬의 메타데이터가 바뀌면 설치를 다시 실행해 생성 어댑터를
+갱신할 수 있습니다. 생성 어댑터를 직접 수정한 경우에는 덮어쓰지 않습니다.
+`doctor`는 갱신되지 않은 메타데이터도 알려줍니다.
+갱신은 같은 원본 경로를 유지합니다. 이름이 같지만 원본 경로가 다른 스킬은
+충돌로 처리하므로, 다른 이름을 쓰거나 기존 연결을 먼저 복원해야 합니다.
 
 `restore`는 모든 복구 대상을 먼저 확인합니다. 생성한 링크와 어댑터를 제거하고,
 설치 후 변경되지 않은 원래 설정을 복구합니다. 새로 추가한 사용자 파일과

@@ -25,12 +25,24 @@ class ConfigError(Exception):
     """A bounded error whose message contains no configuration values."""
 
 
+class WriteConflict(ConfigError):
+    """A guarded publication failed without replacing another writer's file."""
+
+
 def exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def fingerprint(path: Path) -> dict:
@@ -168,6 +180,22 @@ def gjc_settings(path: Path, skills_root: Path) -> bytes | None:
     return yaml_bytes(parser, settings, path)
 
 
+def copilot_adapter(skill_file: Path, parser: YAML, metadata: dict) -> bytes:
+    hint = metadata.get('argument-hint')
+    if isinstance(hint, list):
+        if not all(isinstance(item, str) for item in hint):
+            raise ConfigError(f'Unsupported argument hint: {skill_file}')
+        metadata['argument-hint'] = ' '.join(hint)
+    header = yaml_bytes(parser, metadata, skill_file).decode()
+    canonical = str(skill_file.absolute())
+    if any(char in canonical for char in ('`', '\n', '\r')):
+        raise ConfigError('Skill paths used in adapters must not contain control/backtick characters')
+    return (f'---\n{header}---\n\n'
+            f'Read `{canonical}` and follow its canonical procedure.\n'
+            f'Resolve relative resources against `{skill_file.parent.absolute()}`.\n'
+            'This adapter only normalizes metadata; task authorization still applies.\n').encode()
+
+
 @dataclass
 class Operation:
     kind: str
@@ -246,10 +274,20 @@ class Manager:
 
     def pending(self) -> list[Path]:
         directory = self.root / "journals"
+        self.control_directory(directory)
         if not directory.is_dir():
             return []
         return [path for path in sorted(directory.glob("*.json"))
                 if read_json(path).get("phase") not in {"committed", "rolled-back", "restored"}]
+
+    def control_directory(self, path: Path) -> None:
+        self.writable(path)
+        if path.is_symlink() or (exists(path) and not path.is_dir()):
+            raise ConfigError(f"A control directory must be a real directory: {path}")
+        if exists(path) and (path.stat().st_uid != os.getuid()
+                             or (path.name.startswith('.agent-config-one-shot-')
+                                 and stat.S_IMODE(path.stat().st_mode) & 0o077)):
+            raise ConfigError(f"A control directory must be private (0700): {path}")
 
     @contextmanager
     def lock(self):
@@ -268,6 +306,8 @@ class Manager:
             os.chmod(path, 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
+                self.control_directory(self.root / 'journals')
+                self.control_directory(self.root / 'backups')
                 yield
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
@@ -328,6 +368,15 @@ class Manager:
                 if path.exists() and target.exists() and os.path.samefile(path, target):
                     plan.notes.append(f"Existing authority preserved: {path}")
                     return
+                owned = next((record for record in state['operations']
+                              if record['kind'] == 'link' and record['path'] == str(path)), None)
+                before = fingerprint(path)
+                if (path.parent == self.home / '.copilot/skills'
+                        and target.parent == self.root / 'compat/copilot'
+                        and owned is not None and before == owned['after']):
+                    add(Operation('link', path, target=target, before=before,
+                                  after={'kind': 'link', 'target': str(target)}))
+                    return
                 raise ConfigError(f"Existing content conflicts with a link: {path}")
             directory(path.parent)
             add(Operation("link", path, target=target, before={"kind": "absent"},
@@ -340,7 +389,10 @@ class Manager:
             if before.get("kind") == "file" and before.get("sha256") == digest(data):
                 return
             # Never overwrite a generated adapter that the user edited.
-            if path.is_relative_to(self.root) and before.get("kind") != "absent":
+            owned = next((record for record in state['operations']
+                          if record['path'] == str(path) and record['kind'] == 'write'), None)
+            if (path.is_relative_to(self.root) and before.get("kind") != "absent"
+                    and (owned is None or before != owned['after'])):
                 raise ConfigError(f"Generated content already exists with different bytes: {path}")
             directory(path.parent)
             mode = before.get("mode", 0o600)
@@ -371,6 +423,10 @@ class Manager:
                     config = self.home / adapter.custom_skills_config
                     resolved_config = config.resolve() if config.is_symlink() else config
                     self.writable(resolved_config)
+                    if resolved_config.is_relative_to(self.root):
+                        raise ConfigError('The native GJC config must remain outside the control root')
+                    if config.is_symlink() and not resolved_config.parent.is_dir():
+                        raise ConfigError("The GJC config target directory must already exist")
                     update = gjc_settings(resolved_config, target_skills)
                     if update is not None:
                         content(resolved_config, update)
@@ -400,20 +456,18 @@ class Manager:
                 if name == "copilot":
                     parser, metadata = yaml_object(frontmatter(skill_file.read_text(), skill_file), skill_file)
                     hint = metadata.get("argument-hint")
-                    if isinstance(hint, list):
-                        if not all(isinstance(item, str) for item in hint):
-                            raise ConfigError(f"Unsupported argument hint: {skill_file}")
-                        metadata["argument-hint"] = " ".join(hint)
-                        header = yaml_bytes(parser, metadata, skill_file).decode()
+                    adapter_path = self.root / 'compat/copilot' / label / 'SKILL.md'
+                    owned_adapter = any(record['path'] == str(adapter_path)
+                                        for record in state['operations'])
+                    if owned_adapter:
+                        instruction = (f'\nRead `{skill_file.absolute()}` and follow its canonical procedure.\n'
+                                       f'Resolve relative resources against `{skill_file.parent.absolute()}`.\n').encode()
+                        body = adapter_path.read_bytes().split(b'\n---\n', 1)[-1]
+                        if not body.startswith(instruction):
+                            raise ConfigError('A same-name Copilot adapter already refers to another source')
+                    if isinstance(hint, list) or owned_adapter:
                         target = self.root / "compat/copilot" / label
-                        canonical = str(skill_file.absolute())
-                        if "`" in canonical or "\n" in canonical or "\r" in canonical:
-                            raise ConfigError("Skill paths used in adapters must not contain control/backtick characters")
-                        body = (f"---\n{header}---\n\n"
-                                f"Read `{canonical}` and follow its canonical procedure.\n"
-                                f"Resolve relative resources against `{skill_file.parent.absolute()}`.\n"
-                                "This adapter only normalizes metadata; task authorization still applies.\n")
-                        content(target / "SKILL.md", body.encode())
+                        content(target / "SKILL.md", copilot_adapter(skill_file, parser, metadata))
                     elif adapter.reads_shared and shared_is_default:
                         continue
                 link(target_skills / label, target)
@@ -446,6 +500,134 @@ class Manager:
             target = record.get("target")
             if not isinstance(target, str) or record["after"] != {"kind": "link", "target": target}:
                 raise ConfigError("Invalid managed symbolic link")
+        if 'guard_dir' in record:
+            guard = Path(record['guard_dir'])
+            native_guard = record['kind'] == 'write' and not path.is_relative_to(self.root)
+            copilot_guard = record['kind'] == 'link' and path.parent == self.home / '.copilot/skills'
+            if (not (native_guard or copilot_guard)
+                    or guard.parent != path.parent
+                    or not re.fullmatch(r'\.agent-config-one-shot-[0-9a-f]{32}-[0-9]+', guard.name)):
+                raise ConfigError('Invalid native recovery directory')
+            self.control_directory(guard)
+
+    def guarded_write(self, record: dict, data: bytes, expected: dict, action: str) -> None:
+        """Preserve the displaced inode and publish only to an absent path.
+
+        Native writers do not take our lock. rename captures whichever inode is
+        present, and link refuses to replace a concurrent save. Retained inodes
+        also preserve writes made through descriptors opened before the rename.
+        """
+        path = Path(record['path'])
+        self.writable(path)
+        mode = record['after']['mode'] if action == 'apply' else record['before']['mode']
+        capture = None
+        if expected['kind'] == 'file':
+            guard = Path(record['guard_dir'])
+            self.control_directory(guard)
+            guard.mkdir(mode=0o700, exist_ok=True)
+            capture = guard / f'{action}.old'
+            if exists(capture):
+                if capture.is_symlink() or not capture.is_file():
+                    raise ConfigError('Invalid retained native configuration')
+                # Keep prior attempts, including edits through old descriptors.
+                capture.rename(guard / f'{action}-{uuid.uuid4().hex}.old')
+        descriptor, temporary = tempfile.mkstemp(
+            prefix='.agent-config-publish-', dir=capture.parent if capture is not None else path.parent)
+        prepared = Path(temporary)
+        try:
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, 'wb') as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            if capture is not None:
+                path.rename(capture)
+                sync_directory(capture.parent)
+                sync_directory(path.parent)
+                if fingerprint(capture) != expected:
+                    raise WriteConflict(f'Native configuration changed; retained at {capture}')
+            elif exists(path):
+                raise WriteConflict(f'Native configuration appeared before publication: {path}')
+            try:
+                os.link(prepared, path)
+            except FileExistsError:
+                raise WriteConflict(f'Native configuration was saved concurrently: {path}') from None
+            sync_directory(path.parent)
+        except BaseException:
+            if capture is not None and capture.is_file() and not capture.is_symlink():
+                try:
+                    os.link(capture, path)
+                    sync_directory(path.parent)
+                except FileExistsError:
+                    pass  # Preserve the newer native save and the displaced file.
+            raise
+        finally:
+            prepared.unlink(missing_ok=True)
+
+    def resume_capture(self, record: dict, action: str) -> None:
+        if 'guard_dir' not in record:
+            return
+        self.validate_record(record)
+        capture = Path(record['guard_dir']) / f'{action}.old'
+        if capture.is_symlink() and record['kind'] != 'link':
+            raise ConfigError('Invalid retained native configuration')
+        if capture.is_file() or (record['kind'] == 'link' and capture.is_symlink()):
+            try:
+                os.link(capture, Path(record['path']), follow_symlinks=False)
+                sync_directory(Path(record['path']).parent)
+            except FileExistsError:
+                pass
+
+    def guarded_remove(self, record: dict) -> None:
+        path = Path(record['path'])
+        guard = Path(record['guard_dir'])
+        self.control_directory(guard)
+        guard.mkdir(mode=0o700, exist_ok=True)
+        capture = guard / 'restore.old'
+        if exists(capture):
+            if ((capture.is_symlink() and record['kind'] != 'link')
+                    or not (capture.is_file() or capture.is_symlink())):
+                raise ConfigError('Invalid retained native configuration')
+            capture.rename(guard / f'restore-{uuid.uuid4().hex}.old')
+        path.rename(capture)
+        sync_directory(capture.parent)
+        sync_directory(path.parent)
+        if fingerprint(capture) != record['after']:
+            try:
+                os.link(capture, path, follow_symlinks=False)
+                sync_directory(path.parent)
+            except FileExistsError:
+                pass
+            raise WriteConflict(f'Native configuration changed; retained at {capture}')
+
+    def guarded_link(self, record: dict, target: str, expected: dict, action: str) -> None:
+        path = Path(record['path'])
+        guard = Path(record['guard_dir'])
+        self.control_directory(guard)
+        guard.mkdir(mode=0o700, exist_ok=True)
+        capture = guard / f'{action}.old'
+        if exists(capture):
+            if not (capture.is_file() or capture.is_symlink()):
+                raise ConfigError('Invalid retained skill link')
+            capture.rename(guard / f'{action}-{uuid.uuid4().hex}.old')
+        path.rename(capture)
+        sync_directory(guard)
+        sync_directory(path.parent)
+        try:
+            if fingerprint(capture) != expected:
+                raise WriteConflict(f'Skill link changed; retained at {capture}')
+            try:
+                path.symlink_to(target, target_is_directory=True)
+            except FileExistsError:
+                raise WriteConflict(f'Skill link changed concurrently: {path}') from None
+            sync_directory(path.parent)
+        except BaseException:
+            try:
+                os.link(capture, path, follow_symlinks=False)
+                sync_directory(path.parent)
+            except FileExistsError:
+                pass
+            raise
 
     def apply(self, harnesses: list[str], skills_source: Path | None = None) -> dict:
         with self.lock():
@@ -457,7 +639,9 @@ class Manager:
             journal_dir = self.root / "journals"
             backup_dir = self.root / "backups" / identifier
             journal_dir.mkdir(mode=0o700, exist_ok=True)
+            (self.root / 'backups').mkdir(mode=0o700, exist_ok=True)
             backup_dir.mkdir(parents=True, mode=0o700)
+            self.control_directory(backup_dir)
             journal_path = journal_dir / f"{identifier}.json"
             records = [operation.record() for operation in plan.operations]
             for index, operation in enumerate(plan.operations):
@@ -465,6 +649,10 @@ class Manager:
                     backup = backup_dir / f"{index}.bin"
                     atomic_write(backup, operation.path.read_bytes(), 0o600)
                     records[index]["backup"] = str(backup)
+                if ((operation.kind == 'write' and not operation.path.is_relative_to(self.root))
+                        or (operation.kind == 'link' and operation.before['kind'] == 'link')):
+                    records[index]['guard_dir'] = str(operation.path.parent /
+                        f'.agent-config-one-shot-{identifier}-{index}')
             journal = {"schema": 1, "id": identifier, "home": str(self.home),
                        "root": str(self.root), "phase": "applying", "operations": records,
                        "started": [], "applied": []}
@@ -478,12 +666,41 @@ class Manager:
                     if operation.kind == "mkdir":
                         operation.path.mkdir(mode=0o700)
                     elif operation.kind == "link":
-                        operation.path.symlink_to(operation.target, target_is_directory=operation.target.is_dir())
+                        if operation.before['kind'] == 'link':
+                            try:
+                                self.guarded_link(records[index], str(operation.target), operation.before, 'apply')
+                            except WriteConflict:
+                                journal.setdefault('skipped', []).append(index)
+                                write_json(journal_path, journal)
+                                raise
+                        else:
+                            operation.path.symlink_to(operation.target, target_is_directory=operation.target.is_dir())
                     elif operation.kind == "write":
-                        atomic_write(operation.path, operation.data, operation.after["mode"])
+                        if 'guard_dir' in records[index]:
+                            try:
+                                self.guarded_write(records[index], operation.data, operation.before, 'apply')
+                            except WriteConflict:
+                                journal.setdefault('skipped', []).append(index)
+                                write_json(journal_path, journal)
+                                raise
+                        else:
+                            atomic_write(operation.path, operation.data, operation.after["mode"])
                     journal["applied"].append(index)
                     write_json(journal_path, journal)
-                state["operations"].extend(records)
+                for record in records:
+                    prior = next((old for old in state['operations']
+                                  if old['path'] == record['path'] and old['kind'] == record['kind']
+                                  and record['kind'] in {'write', 'link'}), None)
+                    if prior is None:
+                        state['operations'].append(record)
+                    else:
+                        # One effective undo record keeps the original ownership
+                        # and original backup through any number of refreshes.
+                        prior['after'] = record['after']
+                        if record['kind'] == 'link':
+                            prior['target'] = record['target']
+                            if 'guard_dir' in record:
+                                prior['guard_dir'] = record['guard_dir']
                 state["harnesses"] = list(dict.fromkeys(state["harnesses"] + plan.harnesses))
                 state["sources"] = list(dict.fromkeys(state.get("sources", []) + plan.sources))
                 state.setdefault("transactions", []).append(identifier)
@@ -514,8 +731,13 @@ class Manager:
             backup = Path(record.get("backup", ""))
             if not backup.is_relative_to(self.root / "backups") or backup.is_symlink() or not backup.is_file():
                 raise ConfigError("A required private backup is missing")
+            self.control_directory(backup.parent)
             if digest(backup.read_bytes()) != record["before"]["sha256"]:
                 raise ConfigError("A required private backup has changed")
+            if 'guard_dir' in record:
+                capture = Path(record['guard_dir']) / 'apply.old'
+                if capture.exists() and fingerprint(capture) != record['before']:
+                    raise ConfigError(f'Displaced native configuration changed; inspect {capture}')
 
     def undo(self, record: dict) -> bool:
         self.verify_undo(record)
@@ -526,18 +748,33 @@ class Manager:
                 return False
             path.rmdir()
         elif record["kind"] == "link":
-            path.unlink()
+            if record['before']['kind'] == 'link':
+                self.guarded_link(record, record['before']['target'], record['after'], 'restore')
+            elif 'guard_dir' in record:
+                self.guarded_remove(record)
+            else:
+                path.unlink()
         elif record["before"]["kind"] == "absent":
-            path.unlink()
+            if 'guard_dir' in record:
+                self.guarded_remove(record)
+            else:
+                path.unlink()
         else:
-            atomic_write(path, Path(record["backup"]).read_bytes(), record["before"]["mode"])
+            data = Path(record['backup']).read_bytes()
+            if 'guard_dir' in record:
+                self.guarded_write(record, data, record['after'], 'restore')
+            else:
+                atomic_write(path, data, record['before']['mode'])
         return True
 
     def rollback(self, journal: dict) -> None:
         selected = []
         for index in journal["started"]:
+            if index in journal.get('skipped', []):
+                continue
             record = journal["operations"][index]
             self.validate_record(record)
+            self.resume_capture(record, 'apply')
             current = fingerprint(Path(record["path"]))
             if current == record["after"]:
                 self.verify_undo(record)
@@ -555,6 +792,16 @@ class Manager:
                 journal = read_json(path)
                 if journal.get("home") != str(self.home) or journal.get("root") != str(self.root):
                     raise ConfigError("Interrupted journal has a different owner scope")
+                upgraded = False
+                for index, record in enumerate(journal.get('operations', [])):
+                    self.validate_record(record)
+                    if (record['kind'] == 'write' and 'guard_dir' not in record
+                            and not Path(record['path']).is_relative_to(self.root)):
+                        record['guard_dir'] = str(Path(record['path']).parent /
+                            f'.agent-config-one-shot-{uuid.uuid4().hex}-{index}')
+                        upgraded = True
+                if upgraded:
+                    write_json(path, journal)
                 if journal.get("phase") == "restoring":
                     self.finish_restore(journal, path)
                     state = self.state()
@@ -569,6 +816,41 @@ class Manager:
                 count += 1
             return {"status": "recovered" if count else "unchanged", "transactions": count}
 
+    def retained_native_findings(self) -> list[dict]:
+        """Audit retained inodes even after restore clears active ownership."""
+        directory = self.root / 'journals'
+        self.control_directory(directory)
+        findings = []
+        checked = set()
+        for journal_path in sorted(directory.glob('*.json')):
+            journal = read_json(journal_path)
+            if journal.get('home') != str(self.home) or journal.get('root') != str(self.root):
+                raise ConfigError('A journal has a different owner scope')
+            for record in journal.get('operations', []):
+                if 'guard_dir' not in record:
+                    continue
+                guard = Path(record['guard_dir'])
+                native = Path(record['path'])
+                if (not guard.is_absolute() or '..' in guard.parts or guard.parent != native.parent
+                        or not re.fullmatch(r'\.agent-config-one-shot-[0-9a-f]{32}-[0-9]+', guard.name)):
+                    raise ConfigError('Invalid native recovery directory')
+                self.control_directory(guard)
+                for capture in sorted(guard.glob('*.old')):
+                    if capture in checked:
+                        continue
+                    checked.add(capture)
+                    action = capture.name.split('.')[0].split('-')[0]
+                    if not re.fullmatch(r'(?:apply|restore)(?:-[0-9a-f]{32})?\.old', capture.name):
+                        continue
+                    expected = record['before'] if action == 'apply' else record['after']
+                    if (not capture.is_symlink() and capture.is_file() and native.is_file()
+                            and os.path.samefile(capture, native)):
+                        continue  # These descriptor writes still reach the native file.
+                    if fingerprint(capture) != expected:
+                        findings.append({'status': 'fail', 'path': str(capture),
+                                         'reason': 'retained native config changed; inspect saved contents'})
+        return findings
+
     def doctor(self) -> dict:
         state = self.state()
         findings = []
@@ -580,11 +862,43 @@ class Manager:
                 findings.append({"status": "fail", "path": str(path), "reason": "managed wiring changed"})
             elif record["kind"] == "link" and not path.exists():
                 findings.append({"status": "fail", "path": str(path), "reason": "link target missing"})
+            if (record['kind'] == 'write' and path.is_relative_to(self.root / 'compat/copilot')
+                    and path.is_file()):
+                generated = path.read_bytes()
+                source = next((Path(value) for value in state.get('sources', [])
+                               if Path(value).parent.name == path.parent.name
+                               and f'Read `{value}`'.encode() in generated), None)
+                if source is not None and source.is_file():
+                    try:
+                        parser, metadata = yaml_object(frontmatter(source.read_text(), source), source)
+                        stale = generated != copilot_adapter(source, parser, metadata)
+                    except (ConfigError, OSError, UnicodeError):
+                        stale = True
+                    if stale:
+                        findings.append({'status': 'fail', 'path': str(path),
+                                         'reason': 'Copilot metadata changed; rerun install to refresh'})
         for path in self.pending():
             findings.append({"status": "fail", "path": str(path), "reason": "interrupted transaction; run recover"})
+        findings.extend(self.retained_native_findings())
         for source in state.get("sources", []):
             if not isinstance(source, str) or not Path(source).is_file():
                 findings.append({"status": "fail", "path": str(source), "reason": "shared skill source missing"})
+            elif 'copilot' in state['harnesses']:
+                skill = Path(source)
+                native = self.home / '.copilot/skills' / skill.parent.name
+                shared = skill.parent.parent == self.home / '.agents/skills'
+                direct = native.is_symlink() and native.resolve() == skill.parent.resolve()
+                if shared or direct:
+                    try:
+                        _, metadata = yaml_object(frontmatter(skill.read_text(), skill), skill)
+                        if isinstance(metadata.get('argument-hint'), list):
+                            adapter = self.root / 'compat/copilot' / skill.parent.name / 'SKILL.md'
+                            if not adapter.is_file() or native.resolve() != adapter.parent.resolve():
+                                findings.append({'status': 'fail', 'path': str(skill),
+                                                 'reason': 'Copilot adapter required; rerun install'})
+                    except (ConfigError, OSError, UnicodeError):
+                        findings.append({'status': 'fail', 'path': str(skill),
+                                         'reason': 'invalid Copilot metadata'})
         if self.root.exists() and (stat.S_IMODE(self.root.stat().st_mode) & 0o077):
             findings.append({"status": "fail", "path": str(self.root), "reason": "control root is not private (0700)"})
         return {"status": "fail" if findings else "ok", "installed": bool(state["operations"]),
@@ -599,10 +913,15 @@ class Manager:
             records = state["operations"]
             if not records:
                 return {"status": "unchanged", "changes": 0}
+            identifier = uuid.uuid4().hex
+            for index, record in enumerate(records):
+                if (record['kind'] == 'write' and 'guard_dir' not in record
+                        and not Path(record['path']).is_relative_to(self.root)):
+                    record['guard_dir'] = str(Path(record['path']).parent /
+                        f'.agent-config-one-shot-{identifier}-{index}')
             # Check the entire restore before removing anything.
             for record in records:
                 self.verify_undo(record)
-            identifier = uuid.uuid4().hex
             path = self.root / "journals" / f"restore-{identifier}.json"
             journal = {"schema": 1, "id": identifier, "home": str(self.home),
                        "root": str(self.root), "phase": "restoring",
@@ -620,6 +939,7 @@ class Manager:
             self.validate_record(record)
             if index in journal["undone"]:
                 continue
+            self.resume_capture(record, 'restore')
             current = fingerprint(Path(record["path"]))
             if current != record["before"]:
                 self.verify_undo(record)
